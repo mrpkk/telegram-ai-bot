@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ai-bot-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - chroma_data:/app/chroma_db
+    networks:
+      - ai-bot-net
+
+  admin:
+    build:
+      context: ./admin_panel
+      dockerfile: Dockerfile
+    container_name: ai-bot-admin
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    environment:
+      - API_BASE=http://backend:8000/admin
+    depends_on:
+      - backend
+    networks:
+      - ai-bot-net
+
+volumes:
+  chroma_data:
+
+networks:
+  ai-bot-net:
+    driver: bridge
