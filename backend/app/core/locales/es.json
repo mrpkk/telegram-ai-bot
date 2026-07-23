@@ -1,0 +1,15 @@
+{
+  "start": "🚀 **¡Bienvenido al Bot de Telegram con IA!**\n\nComandos disponibles:\n/start — Mostrar este mensaje\n/ask — Hacer una pregunta a la IA\n/wallet — Conectar tu billetera\n/balance — Ver tu saldo\n/subscribe — Gestionar tu suscripción",
+  "ask_placeholder": "Haz tu pregunta...",
+  "ask_response": "🤖 **Respuesta:**\n\n{answer}",
+  "wallet_connected": "✅ Billetera conectada: {address}",
+  "wallet_error": "❌ Error al conectar la billetera: {error}",
+  "balance": "💰 **Saldo:**\n{balance} USD",
+  "subscribe_free": "🆓 **Plan Gratis**\n10 solicitudes/día",
+  "subscribe_pro": "💎 **Plan Pro**\n$9.99/mes\n100 solicitudes/día + integración DeFi",
+  "subscribe_enterprise": "🏢 **Plan Enterprise**\n$49.99/mes\nSolicitudes ilimitadas + soporte prioritario",
+  "subscribe_success": "✅ Suscripción actualizada a {plan}",
+  "subscribe_error": "❌ Error al actualizar la suscripción: {error}",
+  "language_changed": "✅ Idioma cambiado a español",
+  "language_select": "🌍 Selecciona el idioma:"
+}

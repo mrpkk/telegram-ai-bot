@@ -3,15 +3,28 @@
 import logging
 import time
 from pathlib import Path
+from collections import defaultdict
 
 from telegram import (
     Update, ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardButton, InlineKeyboardMarkup
 )
+from cachetools import TTLCache
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes
 )
+
+# Rate limiting: 10 сообщений в минуту на пользователя
+RATE_LIMIT = 10
+RATE_LIMIT_WINDOW = 60  # секунд
+user_message_timestamps = defaultdict(list)
+
+# Разрешённые домены для аутентификации
+ALLOWED_EMAIL_DOMAINS = ["company.com", "example.com"]  # Замените на реальные домены
+
+# Кеш для проверенных пользователей (user_id: bool)
+auth_cache = TTLCache(maxsize=1000, ttl=3600)
 
 from config import (
     TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_IDS, COMPANY_NAME,
@@ -59,6 +72,19 @@ def helpful_keyboard(log_id: int):
 
 # ── Обработчики команд ────────────────────────────────────────────────
 
+async def cmd_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /auth для проверки аутентификации."""
+    user = update.effective_user
+    if is_authenticated(user.id, user.email):
+        await update.message.reply_text(
+            "✅ Вы успешно аутентифицированы. Доступ разрешён."
+        )
+    else:
+        await update.message.reply_text(
+            "⛔ Доступ запрещён. Используйте корпоративный email (@company.com) для доступа."
+        )
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /start."""
     user = update.effective_user
@@ -67,8 +93,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db = get_db()
     try:
         db.execute(
-            "INSERT OR IGNORE INTO users (telegram_id, username, first_name) VALUES (?, ?, ?)",
-            (user.id, user.username, user.first_name)
+            "INSERT OR IGNORE INTO users (telegram_id, username, first_name, email) VALUES (?, ?, ?, ?)",
+            (user.id, user.username, user.first_name, user.email)
         )
         db.execute(
             "UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE telegram_id = ?",
@@ -90,7 +116,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📝 Просто напиши свой вопрос — я постараюсь помочь!
 
-⚠️ Если я не знаю ответа — передам ваш запрос менеджеру."""
+⚠️ Если я не знаю ответа — передам ваш запрос менеджеру.
+
+🔐 Для доступа используйте корпоративный email (@company.com).
+Проверьте аутентификацию командой /auth."""
 
     await update.message.reply_text(welcome, reply_markup=main_keyboard())
 
@@ -146,12 +175,51 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Обработчики сообщений ─────────────────────────────────────────────
 
+def is_authenticated(user_id: int, user_email: Optional[str] = None) -> bool:
+    """Проверка аутентификации пользователя."""
+    if user_id in TELEGRAM_ADMIN_IDS:
+        return True
+    
+    if user_id in auth_cache:
+        return auth_cache[user_id]
+    
+    if not user_email:
+        return False
+    
+    # Проверка домена email
+    email_domain = user_email.split('@')[-1].lower()
+    is_allowed = any(email_domain.endswith(domain) for domain in ALLOWED_EMAIL_DOMAINS)
+    
+    auth_cache[user_id] = is_allowed
+    return is_allowed
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка текстовых сообщений."""
+    """Обработка текстовых сообщений с rate limiting и аутентификацией."""
+    user_id = update.effective_user.id
+    current_time = time.time()
+
+    # Rate limiting: проверяем количество сообщений за последнюю минуту
+    user_timestamps = user_message_timestamps[user_id]
+    user_timestamps = [t for t in user_timestamps if current_time - t < RATE_LIMIT_WINDOW]
+    user_message_timestamps[user_id] = user_timestamps
+
+    if len(user_timestamps) >= RATE_LIMIT:
+        await update.message.reply_text("⏳ Подождите немного перед следующим вопросом.")
+        return
+    user_message_timestamps[user_id].append(current_time)
+
     text = update.message.text.strip()
     user = update.effective_user
 
     if not text:
+        return
+
+    # Проверка аутентификации
+    if not is_authenticated(user_id, user.email):
+        await update.message.reply_text(
+            "⛔ Доступ запрещён. Используйте корпоративный email (@company.com) для доступа."
+        )
         return
 
     # Кнопки меню
@@ -182,8 +250,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             source = "FAQ"
         else:
             # RAG-поиск
-            context_text = rag_system.get_context(text, k=4)
-            answer = llm.generate(
+            context_text = await rag_system.get_context(text, k=4)
+            answer = await llm.generate(
                 system_prompt=DEFAULT_SYSTEM_PROMPT,
                 user_message=text,
                 context=context_text
@@ -281,6 +349,7 @@ def run_bot():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("auth", cmd_auth))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CallbackQueryHandler(handle_callback))

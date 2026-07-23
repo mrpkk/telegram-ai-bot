@@ -9,6 +9,8 @@ import httpx
 from langchain_community.vectorstores import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.embeddings import Embeddings
+from cachetools import TTLCache
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from config import MISTRAL_API_KEY, MISTRAL_EMBED_URL, CHROMA_PATH, EMBEDDING_MODEL
 
@@ -17,6 +19,10 @@ log = logging.getLogger("rag")
 
 # ── Mistral Embeddings (API) ──────────────────────────────────────────
 
+# Кеширование эмбеддингов (5 минут)
+embedding_cache = TTLCache(maxsize=1000, ttl=300)
+
+
 class MistralEmbeddings(Embeddings):
     """Эмбеддинги через Mistral AI API."""
 
@@ -24,28 +30,34 @@ class MistralEmbeddings(Embeddings):
         self.api_key = api_key
         self.model = model
         self.api_url = MISTRAL_EMBED_URL
-        self.client = httpx.Client(timeout=60.0)
+        self.client = httpx.AsyncClient(timeout=60.0)
 
-    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
         all_embeddings = []
         batch_size = 32
         for i in range(0, len(texts), batch_size):
             batch = texts[i:i + batch_size]
-            embeddings = self._get_embeddings(batch)
+            embeddings = await self._get_embeddings(batch)
             all_embeddings.extend(embeddings)
         return all_embeddings
 
-    def embed_query(self, text: str) -> list[float]:
-        return self._get_embeddings([text])[0]
+    async def embed_query(self, text: str) -> list[float]:
+        cache_key = f"embed_query:{text}"
+        if cache_key in embedding_cache:
+            return embedding_cache[cache_key]
+        embeddings = await self._get_embeddings([text])
+        embedding_cache[cache_key] = embeddings[0]
+        return embeddings[0]
 
-    def _get_embeddings(self, texts: list[str]) -> list[list[float]]:
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+    async def _get_embeddings(self, texts: list[str]) -> list[list[float]]:
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
         payload = {"model": self.model, "input": texts}
         try:
-            resp = self.client.post(self.api_url, json=payload, headers=headers)
+            resp = await self.client.post(self.api_url, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
             return [item["embedding"] for item in data["data"]]
@@ -62,9 +74,9 @@ class RAGSystem:
     def __init__(self):
         self.embeddings = MistralEmbeddings(api_key=MISTRAL_API_KEY, model=EMBEDDING_MODEL)
         self.vectorstore: Optional[Chroma] = None
-        self._init_vectorstore()
+        asyncio.run(self._init_vectorstore())
 
-    def _init_vectorstore(self):
+    async def _init_vectorstore(self):
         """Инициализация векторной БД."""
         if CHROMA_DIR.exists() and any(CHROMA_DIR.iterdir()):
             log.info("Загружаю существующую Chroma базу...")
@@ -79,7 +91,7 @@ class RAGSystem:
                 embedding_function=self.embeddings
             )
 
-    def add_document(self, file_path: Path, filename: str) -> int:
+    async def add_document(self, file_path: Path, filename: str) -> int:
         """Добавляет документ в базу знаний."""
         from langchain_community.document_loaders import (
             PyPDFLoader, TextLoader, CSVLoader, UnstructuredMarkdownLoader
@@ -114,7 +126,7 @@ class RAGSystem:
             )
             chunks = splitter.split_documents(documents)
 
-            self.vectorstore.add_documents(chunks)
+            await self.vectorstore.aadd_documents(chunks)
             log.info(f"Добавлено {len(chunks)} чанков из {filename}")
             return len(chunks)
 
@@ -122,13 +134,13 @@ class RAGSystem:
             log.error(f"Ошибка обработки {filename}: {e}")
             raise
 
-    def search(self, query: str, k: int = 5) -> list[dict]:
+    async def search(self, query: str, k: int = 5) -> list[dict]:
         """Поиск по базе знаний."""
         if not self.vectorstore:
             return []
 
         try:
-            results = self.vectorstore.similarity_search_with_score(query, k=k)
+            results = await self.vectorstore.asimilarity_search_with_score(query, k=k)
             return [
                 {
                     "content": doc.page_content,
@@ -141,9 +153,9 @@ class RAGSystem:
             log.error(f"Ошибка поиска: {e}")
             return []
 
-    def get_context(self, query: str, k: int = 4) -> str:
+    async def get_context(self, query: str, k: int = 4) -> str:
         """Получить контекст для LLM."""
-        results = self.search(query, k=k)
+        results = await self.search(query, k=k)
         if not results:
             return "Нет релевантной информации в базе знаний."
 
@@ -162,6 +174,10 @@ class RAGSystem:
 
 # ── LLM-класс ─────────────────────────────────────────────────────────
 
+# Кеширование ответов LLM (1 час)
+llm_cache = TTLCache(maxsize=1000, ttl=3600)
+
+
 class MistralLLM:
     """Обёртка над Mistral AI."""
 
@@ -169,10 +185,14 @@ class MistralLLM:
         self.api_key = api_key
         self.model = model
         self.api_url = "https://api.mistral.ai/v1/chat/completions"
-        self.client = httpx.Client(timeout=60.0)
+        self.client = httpx.AsyncClient(timeout=60.0)
 
-    def generate(self, system_prompt: str, user_message: str, context: str = "") -> str:
+    async def generate(self, system_prompt: str, user_message: str, context: str = "") -> str:
         """Генерация ответа."""
+        cache_key = f"llm:{system_prompt}:{user_message}:{context[:100]}"
+        if cache_key in llm_cache:
+            return llm_cache[cache_key]
+
         full_prompt = user_message
         if context:
             full_prompt = f"Контекст из базы знаний:\n{context}\n\nВопрос: {user_message}"
@@ -194,13 +214,15 @@ class MistralLLM:
         }
 
         try:
-            resp = self.client.post(self.api_url, json=payload, headers=headers)
+            resp = await self.client.post(self.api_url, json=payload, headers=headers)
             resp.raise_for_status()
             data = resp.json()
-            return data["choices"][0]["message"]["content"]
+            answer = data["choices"][0]["message"]["content"]
+            llm_cache[cache_key] = answer
+            return answer
         except Exception as e:
             log.error(f"Mistral API error: {e}")
             return f"Ошибка генерации: {e}"
 
-    def close(self):
-        self.client.close()
+    async def close(self):
+        await self.client.aclose()

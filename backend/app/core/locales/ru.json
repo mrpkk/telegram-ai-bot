@@ -1,0 +1,15 @@
+{
+  "start": "🚀 **Добро пожаловать в AI Telegram Бот!**\n\nДоступные команды:\n/start — Показать это сообщение\n/ask — Задать вопрос AI\n/wallet — Подключить кошелёк\n/balance — Проверить баланс\n/subscribe — Управление подпиской",
+  "ask_placeholder": "Задайте ваш вопрос...",
+  "ask_response": "🤖 **Ответ:**\n\n{answer}",
+  "wallet_connected": "✅ Кошелёк подключён: {address}",
+  "wallet_error": "❌ Ошибка подключения кошелька: {error}",
+  "balance": "💰 **Баланс:**\n{balance} USD",
+  "subscribe_free": "🆓 **Бесплатный тариф**\n10 запросов/день",
+  "subscribe_pro": "💎 **Pro тариф**\n$9.99/месяц\n100 запросов/день + интеграция с DeFi",
+  "subscribe_enterprise": "🏢 **Enterprise тариф**\n$49.99/месяц\nБезлимитные запросы + приоритетная поддержка",
+  "subscribe_success": "✅ Подписка обновлена на {plan}",
+  "subscribe_error": "❌ Ошибка обновления подписки: {error}",
+  "language_changed": "✅ Язык изменён на русский",
+  "language_select": "🌍 Выберите язык:"
+}

@@ -1,0 +1,15 @@
+{
+  "start": "🚀 **欢迎使用 AI Telegram 机器人！**\n\n可用命令：\n/start — 显示此消息\n/ask — 向 AI 提问\n/wallet — 连接您的钱包\n/balance — 查看余额\n/subscribe — 管理订阅",
+  "ask_placeholder": "输入您的问题...",
+  "ask_response": "🤖 **回答：**\n\n{answer}",
+  "wallet_connected": "✅ 钱包已连接：{address}",
+  "wallet_error": "❌ 连接钱包时出错：{error}",
+  "balance": "💰 **余额：**\n{balance} 美元",
+  "subscribe_free": "🆓 **免费套餐**\n每天 10 次请求",
+  "subscribe_pro": "💎 **Pro 套餐**\n$9.99/月\n每天 100 次请求 + DeFi 集成",
+  "subscribe_enterprise": "🏢 **企业套餐**\n$49.99/月\n无限请求 + 优先支持",
+  "subscribe_success": "✅ 订阅已更新为 {plan}",
+  "subscribe_error": "❌ 更新订阅时出错：{error}",
+  "language_changed": "✅ 语言已切换为中文",
+  "language_select": "🌍 选择语言："
+}

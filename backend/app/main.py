@@ -7,9 +7,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from config import DB_PATH
-from models import init_db
-from admin import router as admin_router
+from app.config import DB_PATH
+from app.models import init_db
+from app.admin import router as admin_router
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("main")
@@ -27,7 +27,7 @@ async def lifespan(app: FastAPI):
     log.info("БД готова")
 
     # Запускаем Telegram-бота в отдельном потоке
-    from bot import run_bot
+    from bot.main import run_bot
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
     log.info("Telegram-бот запущен в фоне")

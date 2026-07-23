@@ -1,0 +1,13 @@
+version: "3.8"
+
+services:
+  rotki:
+    image: rotki/rotki:latest
+    container_name: rotki
+    ports:
+      - "8080:80"
+    volumes:
+      - ./data/rotki:/data
+    environment:
+      - ROTKI_BACKEND_URL=http://localhost:8080
+    restart: unless-stopped
