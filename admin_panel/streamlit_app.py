@@ -1,5 +1,6 @@
 """Админ-панель (Streamlit)."""
 
+import os
 import streamlit as st
 import requests
 import json
@@ -24,8 +25,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-API_BASE = "http://localhost:8000/admin"
-AUTH = ("admin", "admin123")
+API_BASE = os.getenv("ADMIN_API_BASE", "http://127.0.0.1:8007/api/v1/admin")
+AUTH = (os.getenv("ADMIN_USERNAME", "admin"), os.getenv("ADMIN_PASSWORD", ""))
 
 
 def api_get(endpoint: str):
@@ -216,6 +217,35 @@ elif page == "📜 Логи":
 
 elif page == "⚙️ Настройки":
     st.title("⚙️ Настройки")
+
+    st.subheader("📥 Экспорт отчёта")
+    st.write("Скачать данные (пользователи + логи запросов) в Excel или CSV.")
+    col_a, col_b = st.columns(2)
+    if col_a.button("📊 Скачать Excel (.xlsx)"):
+        try:
+            resp = requests.get(f"{API_BASE}/export?fmt=xlsx", auth=AUTH, timeout=30)
+            if resp.ok:
+                st.download_button(
+                    "💾 Сохранить report.xlsx", resp.content,
+                    file_name="report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            else:
+                st.error(f"Ошибка: HTTP {resp.status_code}")
+        except Exception as e:
+            st.error(f"API недоступен: {e}")
+    if col_b.button("📄 Скачать CSV"):
+        try:
+            resp = requests.get(f"{API_BASE}/export?fmt=csv", auth=AUTH, timeout=30)
+            if resp.ok:
+                st.download_button(
+                    "💾 Сохранить report.csv", resp.content,
+                    file_name="report.csv", mime="text/csv"
+                )
+            else:
+                st.error(f"Ошибка: HTTP {resp.status_code}")
+        except Exception as e:
+            st.error(f"API недоступен: {e}")
 
     st.subheader("🤖 Информация о боте")
     st.info("""

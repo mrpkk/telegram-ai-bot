@@ -38,7 +38,7 @@ async def create_subscription_checkout(user_id: int, plan: str) -> str:
         )
         return checkout_session.url
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=503, detail=f"Платёжный сервис Stripe не настроен: {e}")
 
 # Обработка вебхука Stripe
 async def handle_stripe_webhook(payload: bytes, sig_header: str) -> None:

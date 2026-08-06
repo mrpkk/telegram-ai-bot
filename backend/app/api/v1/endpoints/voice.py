@@ -8,6 +8,8 @@ async def speech_to_text_endpoint(audio: UploadFile = File(...)):
     try:
         text = await speech_to_text(audio.file)
         return {"text": text}
+    except HTTPException as e:
+        raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -16,5 +18,7 @@ async def text_to_speech_endpoint(text: str):
     try:
         audio = await text_to_speech(text)
         return {"audio": audio}
+    except HTTPException as e:
+        raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

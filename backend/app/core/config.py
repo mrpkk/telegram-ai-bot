@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -41,3 +42,24 @@ SUMSUB_API_KEY = os.getenv("SUMSUB_API_KEY")
 
 # Paths
 DOCUMENTS_DIR = os.path.join(os.path.dirname(__file__), "../../data/documents")
+CHROMA_PATH = Path(os.getenv("CHROMA_PATH", os.path.join(os.path.dirname(__file__), "../../../data/chroma"))).resolve()
+
+# Admin (Basic Auth)
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin")
+ADMIN_IDS = [int(x) for x in os.getenv("TELEGRAM_ADMIN_IDS", "").split(",") if x.strip()]
+DOCUMENTS_PATH = Path(os.getenv("DOCUMENTS_PATH", os.path.join(os.path.dirname(__file__), "../../../data/documents"))).resolve()
+
+# Public RPC endpoints (без ключей, для демо)
+ETH_RPC_URL = os.getenv("ETH_RPC_URL", "https://ethereum-rpc.publicnode.com")
+SOLANA_RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
+TON_API_URL = os.getenv("TON_API_URL", "https://toncenter.com/api/v2")
+COSMOS_REST_URL = os.getenv("COSMOS_REST_URL", "https://cosmos-rest.publicnode.com")
+SUI_RPC_URL = os.getenv("SUI_RPC_URL", "https://fullnode.mainnet.sui.io")
+APTOS_API_URL = os.getenv("APTOS_API_URL", "https://fullnode.mainnet.aptoslabs.com/v1")
+
+# DeFi (для yield-агента)
+DEFILLAMA_YIELDS_URL = os.getenv("DEFILLAMA_YIELDS_URL", "https://yields.llama.fi/pools")
+
+# Aave
+AAVE_LENDING_POOL_ADDRESS = os.getenv("AAVE_LENDING_POOL_ADDRESS", "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2")

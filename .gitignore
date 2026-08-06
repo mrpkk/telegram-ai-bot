@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 venv/
+.venv/
 chroma_db/
 data/*.db
 data/documents/
@@ -9,3 +10,7 @@ data/documents/
 .DS_Store
 .idea/
 .vscode/
+node_modules/
+*.bak
+*.xlsx
+*.csv

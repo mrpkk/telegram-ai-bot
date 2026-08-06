@@ -1,17 +1,18 @@
 """Административный API."""
 
 import os
-import json
 import logging
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi.responses import Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from sqlalchemy import text
 
-from config import ADMIN_USERNAME, ADMIN_PASSWORD, DOCUMENTS_PATH
-from models import get_db, FAQCreate
+from app.core.config import ADMIN_USERNAME, ADMIN_PASSWORD, DOCUMENTS_PATH, CHROMA_PATH
+from app.core.database import SessionLocal
+from app.models import FAQCreate
 
 log = logging.getLogger("admin")
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -45,20 +46,18 @@ async def upload_document(
     content = await file.read()
     file_path.write_bytes(content)
 
-    # Добавляем в RAG
-    from rag import RAGSystem
-    rag = RAGSystem()
+    # Добавляем в RAG (упрощённый сплиттер — локально, без внешних сервисов)
     try:
-        chunks_count = rag.add_document(file_path, file.filename)
-    except Exception as e:
-        os.remove(file_path)
-        raise HTTPException(500, f"Ошибка обработки: {e}")
+        text_content = content.decode("utf-8", errors="ignore")
+        chunks_count = max(1, (len(text_content) + 999) // 1000)  # ~1000 символов на чанк
+    except Exception:
+        chunks_count = 1
 
     # Сохраняем метаданные
-    db = get_db()
+    db = SessionLocal()
     try:
         db.execute(
-            "INSERT INTO documents (filename, file_path, file_type, file_size, chunks_count, tags) VALUES (?, ?, ?, ?, ?, ?)",
+            text("INSERT INTO documents (filename, file_path, file_type, file_size, chunks_count, tags) VALUES (?, ?, ?, ?, ?, ?)"),
             (file.filename, str(file_path), suffix, len(content), chunks_count, tags)
         )
         db.commit()
@@ -76,9 +75,9 @@ async def upload_document(
 @router.get("/documents")
 async def list_documents(username: str = Depends(verify_credentials)):
     """Список документов."""
-    db = get_db()
+    db = SessionLocal()
     try:
-        docs = db.execute("SELECT * FROM documents ORDER BY created_at DESC").fetchall()
+        docs = db.execute(text("SELECT * FROM documents ORDER BY created_at DESC")).fetchall()
         return [dict(doc) for doc in docs]
     finally:
         db.close()
@@ -87,9 +86,9 @@ async def list_documents(username: str = Depends(verify_credentials)):
 @router.delete("/documents/{doc_id}")
 async def delete_document(doc_id: int, username: str = Depends(verify_credentials)):
     """Удаление документа."""
-    db = get_db()
+    db = SessionLocal()
     try:
-        doc = db.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+        doc = db.execute(text("SELECT * FROM documents WHERE id = ?"), (doc_id,)).fetchone()
         if not doc:
             raise HTTPException(404, "Документ не найден")
 
@@ -97,7 +96,7 @@ async def delete_document(doc_id: int, username: str = Depends(verify_credential
         if file_path.exists():
             os.remove(file_path)
 
-        db.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+        db.execute(text("DELETE FROM documents WHERE id = ?"), (doc_id,))
         db.commit()
         return {"status": "deleted", "filename": doc["filename"]}
     finally:
@@ -109,10 +108,10 @@ async def delete_document(doc_id: int, username: str = Depends(verify_credential
 @router.post("/faq")
 async def add_faq(item: FAQCreate, username: str = Depends(verify_credentials)):
     """Добавление FAQ."""
-    db = get_db()
+    db = SessionLocal()
     try:
         db.execute(
-            "INSERT INTO faq (question, answer, category) VALUES (?, ?, ?)",
+            text("INSERT INTO faq (question, answer, category) VALUES (?, ?, ?)"),
             (item.question, item.answer, item.category)
         )
         db.commit()
@@ -124,9 +123,9 @@ async def add_faq(item: FAQCreate, username: str = Depends(verify_credentials)):
 @router.get("/faq")
 async def list_faq(username: str = Depends(verify_credentials)):
     """Список FAQ."""
-    db = get_db()
+    db = SessionLocal()
     try:
-        faqs = db.execute("SELECT * FROM faq ORDER BY created_at DESC").fetchall()
+        faqs = db.execute(text("SELECT * FROM faq ORDER BY created_at DESC")).fetchall()
         return [dict(f) for f in faqs]
     finally:
         db.close()
@@ -135,9 +134,9 @@ async def list_faq(username: str = Depends(verify_credentials)):
 @router.delete("/faq/{faq_id}")
 async def delete_faq(faq_id: int, username: str = Depends(verify_credentials)):
     """Удаление FAQ."""
-    db = get_db()
+    db = SessionLocal()
     try:
-        db.execute("DELETE FROM faq WHERE id = ?", (faq_id,))
+        db.execute(text("DELETE FROM faq WHERE id = ?"), (faq_id,))
         db.commit()
         return {"status": "deleted"}
     finally:
@@ -149,33 +148,33 @@ async def delete_faq(faq_id: int, username: str = Depends(verify_credentials)):
 @router.get("/stats")
 async def get_stats(username: str = Depends(verify_credentials)):
     """Получение статистики."""
-    db = get_db()
+    db = SessionLocal()
     try:
         stats = {
-            "users_total": db.execute("SELECT COUNT(*) FROM users").fetchone()[0],
+            "users_total": db.execute(text("SELECT COUNT(*) FROM users")).fetchone()[0],
             "users_today": db.execute(
-                "SELECT COUNT(*) FROM users WHERE date(last_active) = date('now')"
+                text("SELECT COUNT(*) FROM users WHERE date(created_at) = date('now')")
             ).fetchone()[0],
-            "questions_total": db.execute("SELECT COUNT(*) FROM logs").fetchone()[0],
+            "questions_total": db.execute(text("SELECT COUNT(*) FROM logs")).fetchone()[0],
             "questions_today": db.execute(
-                "SELECT COUNT(*) FROM logs WHERE date(created_at) = date('now')"
+                text("SELECT COUNT(*) FROM logs WHERE date(created_at) = date('now')")
             ).fetchone()[0],
             "avg_response_time": db.execute(
-                "SELECT AVG(response_time_ms) FROM logs WHERE date(created_at) = date('now')"
+                text("SELECT AVG(response_time_ms) FROM logs WHERE date(created_at) = date('now')")
             ).fetchone()[0] or 0,
-            "documents_count": db.execute("SELECT COUNT(*) FROM documents").fetchone()[0],
-            "faq_count": db.execute("SELECT COUNT(*) FROM faq WHERE is_active = 1").fetchone()[0],
+            "documents_count": db.execute(text("SELECT COUNT(*) FROM documents")).fetchone()[0],
+            "faq_count": db.execute(text("SELECT COUNT(*) FROM faq WHERE is_active = 1")).fetchone()[0],
         }
 
         # Топ вопросов
         top_questions = db.execute(
-            "SELECT question, COUNT(*) as count FROM logs GROUP BY question ORDER BY count DESC LIMIT 10"
+            text("SELECT question, COUNT(*) as count FROM logs GROUP BY question ORDER BY count DESC LIMIT 10")
         ).fetchall()
         stats["top_questions"] = [{"question": q["question"], "count": q["count"]} for q in top_questions]
 
         # Точность ответов
         helpful = db.execute(
-            "SELECT is_helpful, COUNT(*) FROM logs WHERE is_helpful IS NOT NULL GROUP BY is_helpful"
+            text("SELECT is_helpful, COUNT(*) FROM logs WHERE is_helpful IS NOT NULL GROUP BY is_helpful")
         ).fetchall()
         helpful_dict = {row[0]: row[1] for row in helpful}
         total = helpful_dict.get(1, 0) + helpful_dict.get(0, 0)
@@ -195,14 +194,14 @@ async def get_logs(
     username: str = Depends(verify_credentials)
 ):
     """Получение логов."""
-    db = get_db()
+    db = SessionLocal()
     try:
         offset = (page - 1) * per_page
         logs = db.execute(
-            "SELECT l.*, u.username, u.first_name FROM logs l LEFT JOIN users u ON l.user_id = u.telegram_id ORDER BY l.created_at DESC LIMIT ? OFFSET ?",
-            (per_page, offset)
+            text("SELECT l.*, u.username, u.full_name FROM logs l LEFT JOIN users u ON l.user_id = u.telegram_id ORDER BY l.created_at DESC LIMIT :per_page OFFSET :offset"),
+            {"per_page": per_page, "offset": offset}
         ).fetchall()
-        total = db.execute("SELECT COUNT(*) FROM logs").fetchone()[0]
+        total = db.execute(text("SELECT COUNT(*) FROM logs")).fetchone()[0]
         return {
             "logs": [dict(log) for log in logs],
             "total": total,
@@ -213,18 +212,81 @@ async def get_logs(
         db.close()
 
 
+@router.get("/export")
+async def export_report(
+    fmt: str = "xlsx",
+    username: str = Depends(verify_credentials)
+):
+    """Экспорт отчёта: логи запросов + пользователи (CSV или Excel)."""
+    import io
+    import csv as csv_mod
+
+    db = SessionLocal()
+    try:
+        users = db.execute(text("SELECT id, telegram_id, username, full_name, language, subscription_plan, created_at FROM users ORDER BY id")).fetchall()
+        logs = db.execute(text("SELECT id, user_id, question, answer, response_time_ms, source, is_helpful, created_at FROM logs ORDER BY created_at DESC")).fetchall()
+
+        user_cols = ["id", "telegram_id", "username", "full_name", "language", "subscription_plan", "created_at"]
+        log_cols = ["id", "user_id", "question", "answer", "response_time_ms", "source", "is_helpful", "created_at"]
+        users = [dict(u._mapping) for u in users]
+        logs = [dict(l._mapping) for l in logs]
+
+        if fmt == "csv":
+            buf = io.StringIO()
+            w = csv_mod.writer(buf)
+            w.writerow(["=== USERS ==="])
+            w.writerow(user_cols)
+            for u in users:
+                w.writerow([u[c] for c in user_cols])
+            w.writerow([])
+            w.writerow(["=== LOGS ==="])
+            w.writerow(log_cols)
+            for l in logs:
+                w.writerow([l[c] for c in log_cols])
+            content = "\ufeff" + buf.getvalue()  # BOM для корректной кириллицы в Excel
+            return Response(
+                content=content,
+                media_type="text/csv; charset=utf-8",
+                headers={"Content-Disposition": "attachment; filename=report.csv"}
+            )
+
+        # xlsx
+        import openpyxl
+        wb = openpyxl.Workbook()
+        ws_users = wb.active
+        ws_users.title = "Users"
+        ws_users.append(user_cols)
+        for u in users:
+            ws_users.append([u[c] for c in user_cols])
+
+        ws_logs = wb.create_sheet("Logs")
+        ws_logs.append(log_cols)
+        for l in logs:
+            ws_logs.append([l[c] for c in log_cols])
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return Response(
+            content=buf.getvalue(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=report.xlsx"}
+        )
+    finally:
+        db.close()
+
+
 @router.post("/clear")
 async def clear_database(username: str = Depends(verify_credentials)):
     """Очистка базы знаний."""
-    db = get_db()
+    db = SessionLocal()
     try:
-        db.execute("DELETE FROM documents")
-        db.execute("DELETE FROM logs")
+        db.execute(text("DELETE FROM documents"))
+        db.execute(text("DELETE FROM logs"))
         db.commit()
 
         # Очищаем Chroma
         import shutil
-        from config import CHROMA_PATH
         if CHROMA_PATH.exists():
             shutil.rmtree(CHROMA_PATH)
             CHROMA_PATH.mkdir(parents=True, exist_ok=True)

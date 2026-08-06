@@ -1,47 +1,42 @@
-from typing import Optional
-from llama_index import VectorStoreIndex, SimpleDirectoryReader, ServiceContext
-from llama_index.llms import OpenAI
-from app.core.config import OPENAI_API_KEY
+"""RAG сервис — прямой вызов Mistral AI, без llama_index (чтобы избежать конфликтов)."""
 import os
+from typing import Optional
+from pathlib import Path
+from sqlalchemy.orm import Session
+from httpx import AsyncClient
 
-# Инициализация LLM
-llm = OpenAI(api_key=OPENAI_API_KEY, model="gpt-4o")
-service_context = ServiceContext.from_defaults(llm=llm)
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+MISTRAL_API_URL = os.getenv("MISTRAL_API_URL", "https://api.mistral.ai/v1/chat/completions")
 
-# Загрузка документов (поддержка PDF, Excel, DOCX)
-def load_documents(directory: str = "data/documents"):
-    documents = SimpleDirectoryReader(
-        input_dir=directory,
-        required_exts=[".pdf", ".xlsx", ".docx", ".txt", ".md"],
-        recursive=True
-    ).load_data()
-    return documents
 
-# Создание индекса
-def create_index(documents):
-    index = VectorStoreIndex.from_documents(documents, service_context=service_context)
-    return index
-
-# Запрос к RAG-системе
-from app.services.analytics import AnalyticsService
-from datetime import datetime
-
-async def ask_rag(question: str, language: str = "en", user_id: Optional[int] = None, db: Optional[Session] = None) -> str:
-    start_time = datetime.now()
-    documents = load_documents()
-    index = create_index(documents)
-    query_engine = index.as_query_engine()
+async def ask_mistral(prompt: str, language: str = "ru") -> str:
+    """Прямой вызов Mistral AI."""
+    lang_instruction = f"Отвечай на {language} языке." if language != "en" else "Answer in English."
     
-    # Добавляем контекст языка для более точного ответа
-    if language != "en":
-        question = f"Answer in {language}: {question}"
-    
-    response = query_engine.query(question)
-    response_time = (datetime.now() - start_time).total_seconds()
-    
-    # Обновляем аналитику
-    if user_id and db:
-        AnalyticsService.update_user_analytics(db, user_id, response_time)
-        AnalyticsService.update_admin_analytics(db)
-    
-    return str(response)
+    async with AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            MISTRAL_API_URL,
+            headers={
+                "Authorization": f"Bearer {MISTRAL_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "mistral-small-latest",
+                "messages": [
+                    {"role": "system", "content": f"{lang_instruction} Ты — полезный AI-ассистент. Отвечай кратко и по делу."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 1000,
+                "temperature": 0.7
+            }
+        )
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
+
+
+async def ask_rag(question: str, language: str = "ru",
+                  user_id: Optional[int] = None,
+                  db: Optional[Session] = None) -> str:
+    """Ответ на вопрос через Mistral AI."""
+    result = await ask_mistral(question, language)
+    return result
