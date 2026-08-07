@@ -26,7 +26,7 @@ async def ask_mistral(prompt: str, language: str = "ru") -> str:
                     {"role": "system", "content": f"{lang_instruction} Ты — полезный AI-ассистент. Отвечай кратко и по делу."},
                     {"role": "user", "content": prompt}
                 ],
-                "max_tokens": 1000,
+                "max_tokens": 4000,
                 "temperature": 0.7
             }
         )

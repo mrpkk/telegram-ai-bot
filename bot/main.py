@@ -3,7 +3,8 @@ import asyncio
 import logging
 import os
 import random
-from aiogram import Bot, Dispatcher, types
+import tempfile
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.client.default import DefaultBotProperties
@@ -12,11 +13,13 @@ from aiogram.enums import ParseMode
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
+    FSInputFile,
 )
 
 from app.core.config import TELEGRAM_BOT_TOKEN, ADMIN_IDS
 from app.core.database import Base, engine
 from app.services.rag import ask_mistral
+from app.services.image import extract_text_from_image
 
 log = logging.getLogger("bot")
 
@@ -34,6 +37,72 @@ bot = Bot(
 )
 dp = Dispatcher(storage=MemoryStorage())
 
+# Лимит сообщения Telegram (4096) с запасом
+MAX_MSG_LEN = 3800
+
+
+# ── Утилиты ───────────────────────────────────────────────────────────
+
+def split_long_text(text: str, limit: int = MAX_MSG_LEN) -> list[str]:
+    """Разбивает длинный текст на части по границам абзацев, не рвёт слова."""
+    text = text.strip()
+    if len(text) <= limit:
+        return [text]
+
+    parts: list[str] = []
+    # Сначала пытаемся резать по абзацам
+    paragraphs = text.split("\n\n")
+    buf = ""
+    for p in paragraphs:
+        if len(p) > limit:
+            # Очень длинный абзац — режем по предложениям/символам
+            if buf:
+                parts.append(buf.strip())
+                buf = ""
+            for chunk in _split_by_chars(p, limit):
+                parts.append(chunk)
+            continue
+        if len(buf) + len(p) + 2 > limit:
+            parts.append(buf.strip())
+            buf = p
+        else:
+            buf = (buf + "\n\n" + p) if buf else p
+    if buf.strip():
+        parts.append(buf.strip())
+    return parts
+
+
+def _split_by_chars(text: str, limit: int) -> list[str]:
+    """Режет длинный кусок по ~limit символов, стараясь не рвать предложения."""
+    chunks: list[str] = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + limit, n)
+        if end < n:
+            # откатываемся к ближайшей точке/концу предложения/пробелу
+            for sep in (". ", "! ", "? ", "\n", " ", ", "):
+                idx = text.rfind(sep, start + limit // 2, end)
+                if idx != -1:
+                    end = idx + len(sep)
+                    break
+        chunks.append(text[start:end].strip())
+        start = end
+    return [c for c in chunks if c]
+
+
+async def send_long(message: types.Message, text: str, reply_markup=None):
+    """Отправляет текст, разбивая на несколько сообщений если нужно."""
+    parts = split_long_text(text)
+    for i, part in enumerate(parts):
+        if i == len(parts) - 1:
+            await message.answer(part, reply_markup=reply_markup)
+        else:
+            await message.answer(part)
+        # небольшая пауза между сообщениями, чтобы не упереться в rate limit
+        if i < len(parts) - 1:
+            await asyncio.sleep(0.4)
+
 
 # ── Кнопки ─────────────────────────────────────────────────────────────
 
@@ -50,15 +119,16 @@ def main_menu_keyboard() -> ReplyKeyboardMarkup:
 
 
 def bot_links_keyboard() -> InlineKeyboardMarkup:
-    """Инлайн-кнопки: бот, API, разработчик."""
+    """Инлайн-кнопки: API, разработчик."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="✈️ Открыть бота", url="https://t.me/TgBotAiQ_bot"),
-                InlineKeyboardButton(text="📖 API (Swagger)", url="https://t.me/TgBotAiQ_bot"),
+                InlineKeyboardButton(text="📖 API (документация)", callback_data="api_info"),
+                InlineKeyboardButton(text="👨‍💻 Разработчик", callback_data="dev_contact"),
             ],
             [
-                InlineKeyboardButton(text="👨‍💻 Разработчик", url="https://t.me/mrpkk"),
+                InlineKeyboardButton(text="📜 Пример договора", callback_data="contract_sample"),
+                InlineKeyboardButton(text="🌐 Балансы сетей", callback_data="chain_balances"),
             ],
         ]
     )
@@ -108,6 +178,83 @@ DEMO_CHEATSHEET = """🎭 <b>ПАСХАЛОЧКА · демо-шпаргалка
 ✅ Я архитектор и владелец. Код пишу с использованием AI-инструментов — это ускоряет разработку. Отвечаю за каждую часть системы."""
 
 
+# ── Callback-обработчики (кнопки) ─────────────────────────────────────
+
+@dp.callback_query(F.data == "api_info")
+async def cb_api_info(callback: types.CallbackQuery):
+    """Информация об API (Swagger доступен только локально — показываем описание)."""
+    text = (
+        "📖 <b>REST API</b>\n\n"
+        "Бот работает на базе полноценного API-сервера. "
+        "Подключается к вашему сайту, CRM или приложению.\n\n"
+        "🔹 <code>POST /api/v1/ai/ask</code> — AI-ответ на вопрос\n"
+        "🔹 <code>POST /api/v1/image/ocr</code> — распознавание текста с фото\n"
+        "🔹 <code>GET /api/v1/blockchains/.../balance/&lt;адрес&gt;</code> — балансы 6 сетей\n"
+        "🔹 <code>GET /api/v1/agents/risk/var</code> — расчёт риска (VaR)\n"
+        "🔹 <code>GET /api/v1/agents/risk/stress-test</code> — стресс-тест\n"
+        "🔹 <code>POST /api/v1/agents/yield/optimize</code> — DeFi-доходность\n"
+        "🔹 <code>/admin/*</code> — загрузка документов, FAQ, статистика, экспорт\n\n"
+        "📘 Swagger-документация доступна по запросу (или на демо покажу на экране)."
+    )
+    await callback.message.answer(text)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "dev_contact")
+async def cb_dev_contact(callback: types.CallbackQuery):
+    """Контакты разработчика."""
+    text = (
+        "👨‍💻 <b>Разработчик</b>\n\n"
+        "Максим — архитектор и владелец проекта.\n\n"
+        "📩 Telegram: <a href='https://t.me/mrpkk'>@mrpkk</a>\n"
+        "💼 Портфолио: <a href='https://github.com/mrpkk'>github.com/mrpkk</a>\n\n"
+        "Напишите мне — отвечаю быстро."
+    )
+    await callback.message.answer(text, disable_web_page_preview=True)
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "contract_sample")
+async def cb_contract_sample(callback: types.CallbackQuery):
+    """Генерация шаблона договора (демонстрация длинных ответов)."""
+    await callback.message.answer("⏳ Готовлю шаблон договора...")
+    try:
+        answer = await ask_mistral(
+            "Составь полный шаблон договора оказания услуг (исполнитель — разработчик, "
+            "заказчик — клиент). Включи все разделы: предмет договора, сроки, стоимость и порядок "
+            "оплаты, права и обязанности сторон, ответственность, конфиденциальность, "
+            "расторжение, реквизиты. Не сокращай — напиши договор целиком.",
+            "ru",
+        )
+        await send_long(callback.message, f"🤖 <b>Шаблон договора:</b>\n\n{answer}")
+    except Exception as e:
+        await callback.message.answer(
+            "❌ <b>Ошибка обработки</b>\n\n"
+            f"<code>{str(e)}</code>\n\n"
+            "Попробуй ещё раз."
+        )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "chain_balances")
+async def cb_chain_balances(callback: types.CallbackQuery):
+    """Подсказка по команде балансов."""
+    text = (
+        "🌐 <b>Балансы в блокчейн-сетях</b>\n\n"
+        "Проверяю балансы в 6 сетях:\n"
+        "• Ethereum\n• Solana\n• TON\n• Cosmos\n• Sui\n• Aptos\n\n"
+        "Используй команду:\n"
+        "<code>/balance 0x1234...abc</code> — баланс Ethereum\n"
+        "<code>/balance SOL 9x...xyz</code> — баланс Solana\n"
+        "<code>/balance TON UQ...abc</code> — баланс TON\n\n"
+        "Сети определяются автоматически по формату адреса."
+    )
+    await callback.message.answer(text)
+    await callback.answer()
+
+
+# ── Команды ────────────────────────────────────────────────────────────
+
 @dp.message(Command("demo"))
 async def cmd_demo(message: types.Message):
     """Секретная шпаргалка для владельца (только для админов)."""
@@ -126,10 +273,13 @@ async def cmd_start(message: types.Message):
         "🧠 <b>Мои возможности:</b>\n"
         "• Отвечаю на вопросы по вашим документам (RAG)\n"
         "• Анализирую договоры, статьи, отчёты\n"
+        "• Распознаю текст с фотографий (OCR)\n"
+        "• Проверяю балансы в 6 блокчейн-сетях\n"
         "• Помогаю с кодом, переводами, текстами\n"
         "• Работаю 24/7 без выходных\n\n"
         "📌 <b>Попробуй:</b>\n"
         "/ask <i>твой вопрос</i> — задать вопрос\n"
+        "/balance <i>адрес</i> — баланс в сети\n"
         "/features — все возможности\n"
         "/pricing — тарифы\n\n"
         "<i>Или просто напиши мне что-нибудь!</i>"
@@ -144,12 +294,15 @@ async def cmd_help(message: types.Message):
         "📋 <b>Помощь</b>\n\n"
         "<b>/start</b> — запустить\n"
         "<b>/ask</b> <i>вопрос</i> — задать вопрос\n"
+        "<b>/balance</b> <i>адрес</i> — баланс в сети\n"
+        "<b>/risk</b> <i>сумма</i> — стресс-тест портфеля\n"
+        "<b>/yield</b> <i>сеть</i> — DeFi-доходность\n"
         "<b>/features</b> — все возможности\n"
         "<b>/pricing</b> — тарифы\n"
         "<b>/about</b> — о боте\n\n"
-        "<b>💡 Совет:</b>\n"
+        "💡 <b>Совет:</b>\n"
         "Просто напиши мне в чат — я отвечу как AI-ассистент.\n"
-        "Если вопрос сложный — используй /ask\n\n"
+        "Отправь фото с текстом — распознаю его (OCR).\n\n"
         "Пример: <i>/ask Что такое RAG и как он работает?</i>"
     )
     await message.answer(text, reply_markup=main_menu_keyboard())
@@ -168,13 +321,20 @@ async def cmd_features(message: types.Message):
         "🔹 Юрист: загрузил договоры → спроси «какие штрафы?»\n"
         "🔹 Врач: загрузил протоколы → отвечаю по ним\n"
         "🔹 Бухгалтер: загрузил НК → консультирую\n\n"
-        "🔗 <b>3. REST API</b>\n"
-        "Можно подключить к вашему сайту, CRM или приложению.\n"
-        "Swagger-документация: /api/docs\n\n"
-        "🔒 <b>4. Приватность</b>\n"
+        "📷 <b>3. OCR — распознавание текста с фото</b>\n"
+        "Отправьте изображение — получу с него текст.\n\n"
+        "🌐 <b>4. Блокчейн-модуль</b>\n"
+        "Живые балансы в 6 сетях: ETH, SOL, TON, Cosmos, Sui, Aptos.\n"
+        "/balance <i>адрес</i>\n\n"
+        "📈 <b>5. Финансовые агенты</b>\n"
+        "Расчёт риска (VaR), стресс-тесты, подбор DeFi-доходности.\n"
+        "/risk <i>сумма</i> · /yield <i>сеть</i>\n\n"
+        "🔗 <b>6. REST API</b>\n"
+        "Можно подключить к вашему сайту, CRM или приложению.\n\n"
+        "🔒 <b>7. Приватность</b>\n"
         "Ваши документы не уходят третьим лицам.\n"
         "Всё обрабатывается локально.\n\n"
-        "⚡ <b>5. 24/7 Доступность</b>\n"
+        "⚡ <b>8. 24/7 Доступность</b>\n"
         "Работаю без перерывов и выходных."
     )
     await message.answer(text, reply_markup=bot_links_keyboard())
@@ -211,11 +371,13 @@ async def cmd_about(message: types.Message):
     """О боте."""
     text = (
         "🤖 <b>AI Business Assistant</b>\n\n"
-        "Версия: 2.0.0\n"
+        "Версия: 2.1.0\n"
         "AI: Mistral AI (mistral-small-latest)\n"
         "Технологии: FastAPI + RAG (гибридный поиск)\n"
         "RAG: BM25 + Векторный поиск + AI\n"
-        "Документы: PDF, DOCX, XLSX, TXT\n\n"
+        "Документы: PDF, DOCX, XLSX, TXT\n"
+        "OCR: Tesseract (локально, без внешних сервисов)\n"
+        "Блокчейн: ETH, SOL, TON, Cosmos, Sui, Aptos\n\n"
         "⚡ <b>Стек:</b>\n"
         "• Python 3.14 / FastAPI / aiogram 3.x\n"
         "• SQLite + SQLAlchemy\n"
@@ -242,11 +404,11 @@ async def cmd_ask(message: types.Message):
         )
         await message.answer(text)
         return
-    
+
     await message.answer("⏳ Анализирую ваш вопрос...")
     try:
         answer = await ask_mistral(question, "ru")
-        await message.answer(f"🤖 <b>Ответ:</b>\n\n{answer}")
+        await send_long(message, f"🤖 <b>Ответ:</b>\n\n{answer}")
     except Exception as e:
         await message.answer(
             "❌ <b>Произошла ошибка</b>\n\n"
@@ -254,6 +416,253 @@ async def cmd_ask(message: types.Message):
             "Попробуй ещё раз или обратись к @mrpkk"
         )
 
+
+# ── Блокчейн и финансовые агенты ──────────────────────────────────────
+
+async def _get_balance_for_chain(chain: str, address: str) -> float:
+    """Возвращает баланс в указанной сети."""
+    if chain == "ethereum":
+        from app.services.blockchains.ethereum import EthereumClient
+        return await EthereumClient().get_balance(address)
+    if chain == "solana":
+        from app.services.blockchains.solana import SolanaClient
+        return await SolanaClient().get_balance(address)
+    if chain == "ton":
+        from app.services.blockchains.ton import TONClient
+        return await TONClient().get_balance(address)
+    if chain == "cosmos":
+        from app.services.blockchains.cosmos import CosmosClient
+        return await CosmosClient().get_balance(address)
+    if chain == "sui":
+        from app.services.blockchains.sui import SuiClient
+        return await SuiClient().get_balance(address)
+    if chain == "aptos":
+        from app.services.blockchains.aptos import AptosClient
+        return await AptosClient().get_balance(address)
+    raise ValueError(f"Неизвестная сеть: {chain}")
+
+
+def _detect_chain(address: str) -> str:
+    """Определяет сеть по формату адреса."""
+    a = address.strip()
+    if a.startswith(("0x",)) and len(a) == 42:
+        return "ethereum"
+    if a.startswith("UQ") or a.startswith("EQ") or (a.startswith("0:") and len(a) == 66):
+        return "ton"
+    if a.startswith("0x") and len(a) == 64:
+        return "aptos"
+    if a.startswith("0x") and len(a) == 66:
+        return "sui"
+    if a.startswith("cosmos1") or a.startswith("cosmosvaloper"):
+        return "cosmos"
+    # Solana — base58, 32-44 символа
+    if 32 <= len(a) <= 44 and not a.startswith("0x"):
+        return "solana"
+    return "ethereum"
+
+
+@dp.message(Command("balance"))
+async def cmd_balance(message: types.Message):
+    """Баланс в блокчейн-сети."""
+    parts = message.text.split(maxsplit=2)
+    if len(parts) < 2:
+        text = (
+            "🌐 <b>Проверка баланса</b>\n\n"
+            "Используй:\n"
+            "<code>/balance 0x1234...abc</code> — Ethereum/BNB\n"
+            "<code>/balance SOL 9x...xyz</code> — Solana\n"
+            "<code>/balance TON UQ...abc</code> — TON\n\n"
+            "Сети определяются автоматически по формату адреса."
+        )
+        await message.answer(text)
+        return
+
+    if len(parts) == 3 and parts[1].upper() in ("SOL", "TON", "ETH", "COSMOS", "SUI", "APTOS"):
+        chain_hint = parts[1].upper()
+        address = parts[2]
+        chain_map = {
+            "SOL": "solana", "TON": "ton", "ETH": "ethereum",
+            "COSMOS": "cosmos", "SUI": "sui", "APTOS": "aptos",
+        }
+        chain = chain_map[chain_hint]
+    else:
+        address = parts[1]
+        chain = _detect_chain(address)
+
+    await message.answer(f"⏳ Запрашиваю баланс в сети <b>{chain}</b>...")
+    try:
+        balance = await _get_balance_for_chain(chain, address)
+        symbols = {
+            "ethereum": "ETH", "solana": "SOL", "ton": "TON",
+            "cosmos": "ATOM", "sui": "SUI", "aptos": "APT",
+        }
+        text = (
+            f"🌐 <b>Баланс в сети {chain}</b>\n\n"
+            f"💰 <code>{balance}</code> {symbols.get(chain, '')}\n"
+            f"📍 Адрес: <code>{address}</code>"
+        )
+        await message.answer(text, disable_web_page_preview=True)
+    except Exception as e:
+        await message.answer(
+            "❌ <b>Не удалось получить баланс</b>\n\n"
+            f"<code>{str(e)}</code>\n\n"
+            "Проверь адрес или попробуй позже."
+        )
+
+
+@dp.message(Command("risk"))
+async def cmd_risk(message: types.Message):
+    """Стресс-тест портфеля."""
+    parts = message.text.split()
+    amount = 10000.0
+    if len(parts) > 1:
+        try:
+            amount = float(parts[1].replace(",", "."))
+        except ValueError:
+            pass
+
+    await message.answer(f"⏳ Стресс-тест портфеля на <b>{amount:,.0f} ₽</b>...")
+    try:
+        from app.services.agents.risk.models import StressTester
+        scenarios = {
+            "flash_crash_-10%": -0.10,
+            "correction_-20%": -0.20,
+            "bear_market_-40%": -0.40,
+            "black_swan_-60%": -0.60,
+        }
+        results = StressTester.run(amount, scenarios)
+        lines = [f"📈 <b>Стресс-тест портфеля</b>\n\n💼 Сумма: {amount:,.0f} ₽\n"]
+        for name, value in results.items():
+            label = name.replace("_", " ").replace("-", " ").title()
+            lines.append(f"🔻 {label}: <b>{value:,.0f} ₽</b>")
+        lines.append("\n<i>Сценарии: резкое падение рынка и кризисы разной глубины.</i>")
+        await message.answer("\n".join(lines))
+    except Exception as e:
+        await message.answer(
+            "❌ <b>Ошибка расчёта</b>\n\n"
+            f"<code>{str(e)}</code>"
+        )
+
+
+@dp.message(Command("yield"))
+async def cmd_yield(message: types.Message):
+    """DeFi-доходность."""
+    parts = message.text.split()
+    chain = parts[1].lower() if len(parts) > 1 else "ethereum"
+
+    await message.answer(f"⏳ Ищу лучшие DeFi-пулы в сети <b>{chain}</b>...")
+    try:
+        import httpx
+        from app.core.config import DEFILLAMA_YIELDS_URL
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(DEFILLAMA_YIELDS_URL)
+            resp.raise_for_status()
+            pools = resp.json().get("data", [])
+
+        candidates = [
+            p for p in pools
+            if p.get("chain", "").lower() == chain and p.get("apy", 0) and p.get("tvlUsd", 0)
+        ]
+        candidates.sort(key=lambda p: (p.get("apy", 0), p.get("tvlUsd", 0)), reverse=True)
+        top = candidates[:5]
+
+        if not top:
+            await message.answer(f"😕 Не нашёл пулов в сети <b>{chain}</b>. Попробуй: ethereum, bsc, polygon, arbitrum, optimism, base.")
+            return
+
+        lines = [f"🌾 <b>Топ DeFi-доходность ({chain})</b>\n"]
+        for p in top:
+            apy = p.get("apy", 0)
+            tvl = p.get("tvlUsd", 0)
+            project = p.get("project", "?")
+            symbol = p.get("symbol", "?")
+            lines.append(
+                f"• <b>{project}</b> ({symbol})\n"
+                f"  APY: <b>{apy:.2f}%</b> · TVL: ${tvl:,.0f}"
+            )
+        lines.append("\n<i>Данные: DeFiLlama (реальные, без ключей).</i>")
+        await send_long(message, "\n".join(lines))
+    except Exception as e:
+        await message.answer(
+            "❌ <b>Ошибка получения данных</b>\n\n"
+            f"<code>{str(e)}</code>"
+        )
+
+
+# ── OCR: обработка фото ───────────────────────────────────────────────
+
+@dp.message(F.photo)
+async def handle_photo(message: types.Message):
+    """Распознавание текста с фотографии (OCR)."""
+    if not message.photo:
+        return
+    file_id = message.photo[-1].file_id
+    await message.answer("🔍 Распознаю текст на изображении...")
+
+    tmp_path = None
+    try:
+        file = await bot.get_file(file_id)
+        suffix = os.path.splitext(file.file_path or "")[1] or ".jpg"
+        fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+        os.close(fd)
+        await bot.download_file(file.file_path, destination=tmp_path)
+
+        text = await extract_text_from_image(tmp_path)
+        if not text:
+            await message.answer(
+                "😕 Не удалось распознать текст на изображении.\n"
+                "Попробуй фото с более чётким текстом."
+            )
+        else:
+            await send_long(message, f"📄 <b>Распознанный текст:</b>\n\n{text}")
+    except Exception as e:
+        await message.answer(
+            "❌ <b>Ошибка OCR</b>\n\n"
+            f"<code>{str(e)}</code>"
+        )
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+@dp.message(F.document)
+async def handle_document(message: types.Message):
+    """Распознавание текста с загруженного изображения-файла (OCR)."""
+    doc = message.document
+    if not doc or not (doc.mime_type or "").startswith("image/"):
+        return
+    await message.answer("🔍 Распознаю текст из файла...")
+
+    tmp_path = None
+    try:
+        file = await bot.get_file(doc.file_id)
+        suffix = os.path.splitext(doc.file_name or "")[1] or ".png"
+        fd, tmp_path = tempfile.mkstemp(suffix=suffix)
+        os.close(fd)
+        await bot.download_file(file.file_path, destination=tmp_path)
+
+        text = await extract_text_from_image(tmp_path)
+        if not text:
+            await message.answer("😕 Не удалось распознать текст на изображении.")
+        else:
+            await send_long(message, f"📄 <b>Распознанный текст:</b>\n\n{text}")
+    except Exception as e:
+        await message.answer(
+            "❌ <b>Ошибка OCR</b>\n\n"
+            f"<code>{str(e)}</code>"
+        )
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+# ── Обычные сообщения ─────────────────────────────────────────────────
 
 @dp.message()
 async def handle_message(message: types.Message):
@@ -278,7 +687,7 @@ async def handle_message(message: types.Message):
         await message.answer(f"🤖 <b>Вопрос:</b> {question}\n\n⏳ Думаю...")
         try:
             answer = await ask_mistral(question, "ru")
-            await message.answer(f"🤖 {answer}")
+            await send_long(message, f"🤖 {answer}")
         except Exception as e:
             await message.answer(
                 "❌ <b>Ошибка обработки</b>\n\n"
@@ -290,7 +699,7 @@ async def handle_message(message: types.Message):
     # Маленькая "фишка" — приветствие по-разному
     greeting_words = ["привет", "здравствуй", "hello", "hi", "дарова", "сап", "ку"]
     is_greeting = any(message.text.lower().startswith(w) for w in greeting_words)
-    
+
     if is_greeting:
         await message.answer(
             "👋 Привет! Я AI Business Assistant.\n"
@@ -298,14 +707,11 @@ async def handle_message(message: types.Message):
             "Или напиши /features чтобы узнать мои возможности."
         )
         return
-    
+
     await message.answer("⏳ Думаю...")
     try:
         answer = await ask_mistral(message.text, "ru")
-        # Telegram ограничение — 4096 символов
-        if len(answer) > 4000:
-            answer = answer[:4000] + "\n\n<i>...продолжение в /ask</i>"
-        await message.answer(f"🤖 {answer}")
+        await send_long(message, f"🤖 {answer}")
     except Exception as e:
         await message.answer(
             "❌ <b>Ошибка обработки</b>\n\n"
