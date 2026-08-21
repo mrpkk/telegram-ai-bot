@@ -1,5 +1,6 @@
 """Telegram-бот с AI ядром и поддержкой Tor SOCKS5."""
 import asyncio
+from datetime import timedelta, timezone
 import logging
 import os
 import random
@@ -17,7 +18,12 @@ from aiogram.types import (
 )
 
 from app.core.config import TELEGRAM_BOT_TOKEN, ADMIN_IDS
-from app.core.database import Base, engine
+from app.core.database import Base, engine, SessionLocal
+from app.models.billing import Subscription, QuestionLog
+from app.services.stars_payments import (
+    PLAN_DAYS, PLAN_STARS, PLANS_TEXT_RU, daily_limit_for,
+    new_expiry, send_plan_invoice, subscription_active,
+)
 from app.services.rag import ask_mistral
 from app.services.image import extract_text_from_image
 
@@ -389,6 +395,110 @@ async def cmd_about(message: types.Message):
     await message.answer(text, reply_markup=bot_links_keyboard())
 
 
+
+
+# ── Монетизация: Telegram Stars ──────────────────────────────────────
+
+def _now_utc():
+    from datetime import datetime, timezone, timedelta
+    return datetime.now(timezone.utc)
+
+
+def _today():
+    return _now_utc().strftime("%Y-%m-%d")
+
+
+def get_active_subscription(telegram_id: int):
+    db = SessionLocal()
+    try:
+        sub = db.query(Subscription).filter(
+            Subscription.telegram_id == telegram_id).first()
+        if sub and sub.expires_at.replace(tzinfo=timezone.utc) > _now_utc():
+            return sub
+        return None
+    finally:
+        db.close()
+
+
+@dp.message(Command("subscribe"))
+async def cmd_subscribe(message: types.Message):
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.insert(InlineKeyboardButton(f"Pro · {PLAN_STARS['pro']}⭐", callback_data="buy:pro"))
+    kb.insert(InlineKeyboardButton(f"Enterprise · {PLAN_STARS['enterprise']}⭐", callback_data="buy:enterprise"))
+    text = ("💎 <b>Тарифы</b>\n\n" + "\n".join(
+        f"• {t}" for t in PLANS_TEXT_RU.values()) +
+        "\n\nОплата — Telegram Stars. Выберите план:")
+    await message.answer(text, reply_markup=kb)
+
+
+@dp.callback_query(F.data.startswith("buy:"))
+async def cb_buy(call: types.CallbackQuery):
+    plan = call.data.split(":", 1)[1]
+    if plan not in PLAN_STARS:
+        await call.answer("Неизвестный тариф", show_alert=True); return
+    await send_plan_invoice(bot, call.message.chat.id, plan)
+    await call.answer()
+
+
+@dp.pre_checkout_query_handler()
+async def pre_checkout(q: types.PreCheckoutQuery):
+    # payload вида subscribe:<plan>
+    if not q.invoice_payload.startswith("subscribe:"):
+        await q.answer(ok=False, error_message="Неизвестный товар")
+        return
+    await q.answer(ok=True)
+
+
+@dp.message(F.successful_payment)
+async def on_paid(message: types.Message):
+    sp = message.successful_payment
+    if not sp.invoice_payload.startswith("subscribe:"):
+        return
+    plan = sp.invoice_payload.split(":", 1)[1]
+    db = SessionLocal()
+    try:
+        sub = db.query(Subscription).filter(
+            Subscription.telegram_id == message.from_user.id).first()
+        if sub is None:
+            sub = Subscription(telegram_id=message.from_user.id, plan=plan)
+            db.add(sub)
+        else:
+            # продление поверх активной подписки
+            base = sub.expires_at.replace(tzinfo=timezone.utc)
+            base = base if base > _now_utc() else _now_utc()
+            sub.expires_at = base + timedelta(days=PLAN_DAYS[plan])
+        sub.plan = plan
+        sub.stars_paid = sp.total_amount
+        if sub.starts_at is None or sub.plan != plan:
+            sub.starts_at = func.now()
+        if getattr(sub, "expires_at", None) is None or sub.expires_at is None:
+            sub.expires_at = new_expiry(PLAN_DAYS[plan])
+        db.commit()
+        exp = sub.expires_at.strftime("%d.%m.%Y") if sub.expires_at else "?"
+    finally:
+        db.close()
+    await message.answer(
+        f"✅ <b>Подписка {plan.upper()} активирована!</b>\n"
+        f"Оплачено: {sp.total_amount}⭐ · действует до {exp}\n"
+        f"Лимит вопросов: {daily_limit_for(plan)}/день")
+
+
+@dp.message(Command("myplan"))
+async def cmd_myplan(message: types.Message):
+    sub = get_active_subscription(message.from_user.id)
+    if sub:
+        await message.answer(
+            f"💎 План: <b>{sub.plan.upper()}</b>\n"
+            f"До: {sub.expires_at.strftime('%d.%m.%Y')}\n"
+            f"Лимит: {daily_limit_for(sub.plan)} вопросов/день")
+    else:
+        await message.answer(
+            "🆓 План: Free — 20 вопросов/день\n"
+            "Расширить: /subscribe")
+
+# ── конец блока монетизации ──────────────────────────────────────────
+
+
 @dp.message(Command("ask"))
 async def cmd_ask(message: types.Message):
     """Ответ на вопрос через AI."""
@@ -404,6 +514,29 @@ async def cmd_ask(message: types.Message):
         )
         await message.answer(text)
         return
+
+    # лимит по тарифу
+    from datetime import datetime as _dt, timezone as _tz
+    sub = get_active_subscription(message.from_user.id)
+    limit = daily_limit_for(sub.plan if sub else "free")
+    db = SessionLocal()
+    try:
+        used_today = db.query(QuestionLog).filter(
+            QuestionLog.telegram_id == message.from_user.id,
+            QuestionLog.day == _today()).count()
+    finally:
+        db.close()
+    if used_today >= limit:
+        await message.answer(
+            f"🚧 Дневной лимит исчерпан ({limit} вопросов).\n"
+            f"Продлите возможности: /subscribe")
+        return
+    dbs = SessionLocal()
+    try:
+        dbs.add(QuestionLog(telegram_id=message.from_user.id, day=_today()))
+        dbs.commit()
+    finally:
+        dbs.close()
 
     await message.answer("⏳ Анализирую ваш вопрос...")
     try:
