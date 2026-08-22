@@ -440,7 +440,7 @@ async def cb_buy(call: types.CallbackQuery):
     await call.answer()
 
 
-@dp.pre_checkout_query_handler()
+@dp.pre_checkout_query()
 async def pre_checkout(q: types.PreCheckoutQuery):
     # payload вида subscribe:<plan>
     if not q.invoice_payload.startswith("subscribe:"):
@@ -871,3 +871,7 @@ async def run_bot():
         log.info("Бот будет работать в офлайн-режиме (только API)")
         return
     await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(run_bot())
