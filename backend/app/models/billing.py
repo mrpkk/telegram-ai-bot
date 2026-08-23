@@ -21,6 +21,16 @@ class Subscription(Base):
     expires_at = Column(DateTime(timezone=True), nullable=False)
 
 
+class DocumentRegistry(Base):
+    __tablename__ = "document_registry"
+
+    id = Column(Integer, primary_key=True, index=True)
+    telegram_id = Column(Integer, index=True)
+    filename = Column(String)
+    chunks = Column(Integer, default=0)
+    added_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class QuestionLog(Base):
     __tablename__ = "question_log"
 
