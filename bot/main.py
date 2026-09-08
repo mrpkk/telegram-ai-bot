@@ -378,7 +378,7 @@ async def cmd_about(message: types.Message):
     text = (
         "🤖 <b>AI Business Assistant</b>\n\n"
         "Версия: 2.1.0\n"
-        "AI: Mistral AI (mistral-small-latest)\n"
+        "AI: GigaChat (Сбер) → Mistral AI (fallback)\n"
         "Технологии: FastAPI + RAG (гибридный поиск)\n"
         "RAG: BM25 + Векторный поиск + AI\n"
         "Документы: PDF, DOCX, XLSX, TXT\n"
@@ -387,7 +387,7 @@ async def cmd_about(message: types.Message):
         "⚡ <b>Стек:</b>\n"
         "• Python 3.14 / FastAPI / aiogram 3.x\n"
         "• SQLite + SQLAlchemy\n"
-        "• Mistral AI (500k req/min free)\n"
+        "• GigaChat (Сбер) + Mistral AI (fallback)\n"
         "• SOCKS5 через Tor (безопасность)\n\n"
         "📅 Запущен: июль 2026\n\n"
         "👨‍💻 Разработчик: <a href='https://t.me/mrpkk'>@mrpkk</a>"

@@ -1,6 +1,7 @@
 """RAG-система с Mistral Embeddings API."""
 
 import os
+import time
 import logging
 from pathlib import Path
 from typing import Optional
@@ -11,8 +12,15 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.embeddings import Embeddings
 from cachetools import TTLCache
 from tenacity import retry, stop_after_attempt, wait_exponential
+from dotenv import load_dotenv
 
-from config import MISTRAL_API_KEY, MISTRAL_EMBED_URL, CHROMA_PATH, EMBEDDING_MODEL
+load_dotenv(os.path.expanduser("~/.env"), override=True)
+load_dotenv()
+
+from config import (  # noqa: E402
+    MISTRAL_API_KEY, MISTRAL_EMBED_URL, CHROMA_PATH, EMBEDDING_MODEL,
+    GIGACHAT_AUTH_KEY, GIGACHAT_SCOPE, GIGACHAT_BASE_URL, GIGACHAT_OAUTH_URL, GIGACHAT_MODEL,
+)
 
 log = logging.getLogger("rag")
 
@@ -177,9 +185,12 @@ class RAGSystem:
 # Кеширование ответов LLM (1 час)
 llm_cache = TTLCache(maxsize=1000, ttl=3600)
 
+# Кэш access_token GigaChat (expires_in ~ 30 мин; запас 60с)
+_giga_token_cache = {"token": None, "expires_at": 0.0}
+
 
 class MistralLLM:
-    """Обёртка над Mistral AI."""
+    """Обёртка над LLM-провайдерами: GigaChat (Сбер) → Mistral AI."""
 
     def __init__(self, api_key: str, model: str):
         self.api_key = api_key
@@ -187,8 +198,60 @@ class MistralLLM:
         self.api_url = "https://api.mistral.ai/v1/chat/completions"
         self.client = httpx.AsyncClient(timeout=60.0)
 
+    async def _giga_access_token(self) -> Optional[str]:
+        """OAuth-токен GigaChat (Authorization: Basic <ключ>, данные scope, заголовок RqUID)."""
+        now = time.time()
+        if _giga_token_cache["token"] and _giga_token_cache["expires_at"] > now + 60:
+            return _giga_token_cache["token"]
+        try:
+            async with httpx.AsyncClient(timeout=20, verify=False) as client:
+                resp = await client.post(
+                    GIGACHAT_OAUTH_URL,
+                    data={"scope": GIGACHAT_SCOPE},
+                    headers={
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Accept": "application/json",
+                        "RqUID": "6f0b1291-c7f3-43c6-bb2e-9f3efb2dc98e",
+                        "Authorization": f"Basic {GIGACHAT_AUTH_KEY}",
+                    },
+                )
+            if resp.status_code >= 400:
+                log.error("GigaChat auth %d: %s", resp.status_code, resp.text[:200])
+                return None
+            data = resp.json()
+            token = data.get("access_token")
+            expires_in = data.get("expires_in", 1800)
+            if token:
+                _giga_token_cache["token"] = token
+                _giga_token_cache["expires_at"] = now + expires_in - 60
+                return token
+        except Exception as e:
+            log.error("GigaChat auth error: %s", e)
+        return None
+
+    async def _giga_generate(self, messages: list) -> str:
+        """Запрос к GigaChat (self-signed сертификаты → verify=False)."""
+        token = await self._giga_access_token()
+        if not token:
+            return ""
+        async with httpx.AsyncClient(timeout=120, verify=False) as client:
+            resp = await client.post(
+                GIGACHAT_BASE_URL,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={
+                    "model": GIGACHAT_MODEL,
+                    "messages": messages,
+                    "temperature": 0.3,
+                    "max_tokens": 1024,
+                },
+            )
+        if resp.status_code != 200:
+            log.error("GigaChat error %d: %s", resp.status_code, resp.text[:200])
+            return ""
+        return resp.json()["choices"][0]["message"]["content"]
+
     async def generate(self, system_prompt: str, user_message: str, context: str = "") -> str:
-        """Генерация ответа."""
+        """Генерация ответа. Цепочка провайдеров: GigaChat → Mistral."""
         cache_key = f"llm:{system_prompt}:{user_message}:{context[:100]}"
         if cache_key in llm_cache:
             return llm_cache[cache_key]
@@ -202,6 +265,18 @@ class MistralLLM:
             {"role": "user", "content": full_prompt},
         ]
 
+        # ── 1. GigaChat (Сбер) — первичный провайдер ──
+        if GIGACHAT_AUTH_KEY:
+            try:
+                answer = await self._giga_generate(messages)
+                if answer:
+                    llm_cache[cache_key] = answer
+                    return answer
+                log.warning("GigaChat вернул пустой ответ — переключаюсь на Mistral")
+            except Exception as e:
+                log.warning("GigaChat failed: %s — fallback Mistral", e)
+
+        # ── 2. Mistral AI — fallback ──
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
